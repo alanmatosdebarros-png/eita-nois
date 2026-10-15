@@ -1305,7 +1305,7 @@ body.ws #revStatus{display:none}
       <div class="card">
         <h2>IA da plataforma (Claude)</h2>
         <p class="sub">Cole a sua chave da API da Anthropic (console.anthropic.com). Ela fica salva só neste navegador e é usada nas legendas do post, no acervo, em Oportunidades, no Search Lab e nos Insights.</p>
-        <label class="f" style="margin-top:12px">Chave da API<input type="password" id="apiKey" autocomplete="off" style="background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 11px;width:100%"></label>
+        <label class="f" style="margin-top:12px">Chave da API<input type="password" id="apiKey" autocomplete="new-password" name="eita-api" style="background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 11px;width:100%"></label>
         <label class="f" style="margin-top:10px">Modelo<input type="text" id="apiModel"></label>
       </div>
       <div class="card">
@@ -3239,7 +3239,7 @@ function renderConfig(){
   renderKit();
 }
 async function saveSettings(){ await idb.set("kv","settings",Object.assign({},settings)); }
-$("#apiKey").addEventListener("change", e=>{ lsSet("apiKey", e.target.value.trim()); toast("Chave salva neste navegador"); });
+$("#apiKey").addEventListener("change", e=>{ const v=e.target.value.trim(); if(v && !/^sk-ant-/.test(v)){ e.target.value=lsGet("apiKey",""); return toast("Isso não parece uma chave da API (começa com sk-ant-). Nada foi trocado."); } if(v===lsGet("apiKey","")) return; lsSet("apiKey", v); toast(v?"Chave salva neste navegador":"Chave apagada deste navegador"); });
 $("#apiModel").addEventListener("change", e=>{ lsSet("apiModel", e.target.value.trim()||"claude-sonnet-5-5"); settings.apiModel=e.target.value.trim()||"claude-sonnet-5-5"; saveSettings(); });
 $("#asrModel").addEventListener("change", e=>{ settings.asrModel=e.target.value; saveSettings(); });
 $("#asrAcervo").addEventListener("change", e=>{ settings.asrAcervo=e.target.value; saveSettings(); });
