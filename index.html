@@ -1424,6 +1424,10 @@ html[data-tema] .fab-btn span{background:transparent;color:#fff;font-family:var(
         <p class="sub">Cole a sua chave da API da Anthropic (console.anthropic.com). Ela fica salva só neste navegador e é usada nas legendas do post, no acervo, em Oportunidades, no Search Lab e nos Insights.</p>
         <label class="f" style="margin-top:12px">Chave da API<input type="password" id="apiKey" autocomplete="new-password" name="eita-api" style="background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 11px;width:100%"></label>
         <label class="f" style="margin-top:10px">Modelo<input type="text" id="apiModel"></label>
+        <h2 style="margin-top:22px">Reserva automática</h2>
+        <p class="sub">Se o Claude der erro (sem crédito, chave recusada, fora do ar), o Estúdio passa sozinho pro Gemini e, se precisar, pro Groq. Cole as chaves uma vez: ficam salvas neste navegador e valem pro eita-nois e pro eita-nois-2.</p>
+        <label class="f" style="margin-top:12px">Chave do Gemini (Google AI Studio)<input type="password" id="geminiKey" autocomplete="new-password" name="eita-gemini" style="background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 11px;width:100%"></label>
+        <label class="f" style="margin-top:10px">Chave do Groq<input type="password" id="groqKey" autocomplete="new-password" name="eita-groq" style="background:var(--bg);border:1px solid var(--line);border-radius:var(--r-sm);padding:9px 11px;width:100%"></label>
       </div>
       <div class="card">
         <h2>Transcrição</h2>
@@ -3298,7 +3302,7 @@ $("#caps").addEventListener("click", e=>{ const c=e.target.closest("[data-copy]"
   if(c){ const i=+c.dataset.copy, t=clean(cur.post.legendas[i].texto), cta=ctaOf(cur); copyText($("#withCta").checked&&cta?t+"\n\n"+cta:t); }
   if(p){ const i=+p.dataset.pick; cur.post.chosen=cur.post.chosen===i?null:i; saveJob(cur); renderCaps(); renderFiles(); } });
 $("#genBtn").addEventListener("click", async ()=>{
-  const key=lsGet("apiKey",""); if(!key){ go("config"); return toast("Cole a chave da API primeiro"); }
+  if(!temIA()){ go("config"); return toast("Cole a chave da API primeiro"); }
   const gnt=marcaDe(cur)==="gnt"; if(gnt && !PROGRAMAS[cur.prog]) return; if(!cuesOut(cur).length) return toast("O corte ainda não tem legendas");
   $("#genBtn").disabled=true; $("#genStatus").textContent=gnt?`Lendo ${refsOf(cur.prog).length} legendas de ${PROGRAMAS[cur.prog].nome} e escrevendo...`:`Lendo o tom de ${MARCAS[marcaDe(cur)].nome} e escrevendo...`;
   try{
@@ -3322,7 +3326,64 @@ async function callClaude(opts){
   EM_ANDAMENTO.add(chave);
   try{ return await callClaude1(opts); } finally{ EM_ANDAMENTO.delete(chave); }
 }
-async function callClaude1({system, messages, max_tokens=8000, tools, recurso="Outro", marca=MARCA, model}){
+/* ---------- reserva: se o Claude falhar, tenta Gemini e depois Groq ---------- */
+const temIA = () => !!(lsGet("apiKey","")||lsGet("geminiKey","")||lsGet("groqKey",""));
+function iaTxt(c){ if(c==null) return ""; if(typeof c==="string") return c.replace("<<<CACHE>>>",""); return (Array.isArray(c)?c:[c]).map(b=>typeof b==="string"?b:(b&&b.type==="text"?b.text:"")).join("\n"); }
+function iaImgs(c){ return Array.isArray(c)?c.filter(b=>b&&b.type==="image"&&b.source&&b.source.type==="base64"):[]; }
+const iaBusca = tools => (tools||[]).some(t=>/web_search/.test((t&&(t.type||t.name))||""));
+async function callClaude1(opts){
+  const erros=[];
+  if(lsGet("apiKey","")){ try{ return await callAnthropic(opts); }catch(e){ if(e.code==="dup") throw e; erros.push(e); console.warn("Claude falhou, indo pra reserva:", e.message); } }
+  if(lsGet("geminiKey","")){ try{ return await callGeminiIA(opts); }catch(e){ erros.push(e); console.warn("Gemini falhou:", e.message); } }
+  if(lsGet("groqKey","")){ try{ return await callGroqIA(opts); }catch(e){ erros.push(e); console.warn("Groq falhou:", e.message); } }
+  if(!erros.length){ const e=new Error("Cole a chave da API em Configurações."); e.code="nokey"; throw e; }
+  throw erros[0];
+}
+async function callGeminiIA({system, messages, max_tokens=8000, tools}){
+  const key=lsGet("geminiKey",""), busca=iaBusca(tools);
+  const contents=messages.map(m=>({role:m.role==="assistant"?"model":"user", parts:[...iaImgs(m.content).map(b=>({inline_data:{mime_type:b.source.media_type, data:b.source.data}})), {text:iaTxt(m.content)||" "}]}));
+  let ult=null;
+  for(const mod of ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-2.0-flash"]){
+    for(const comBusca of busca?[true,false]:[false]){
+      const body={contents, generationConfig:{maxOutputTokens:Math.min(max_tokens||8000, 60000), temperature:0.8}};
+      if(system) body.systemInstruction={parts:[{text:iaTxt(system)}]};
+      if(comBusca) body.tools=[{google_search:{}}];
+      let r, d={};
+      try{ r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent`,{method:"POST",headers:{"content-type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)}); d=await r.json().catch(()=>({})); }
+      catch(e){ ult=e; break; }
+      if(!r.ok){ ult=new Error((d.error&&d.error.message)||("o Gemini respondeu com erro "+r.status)); ult.status=r.status; if(comBusca && r.status===400) continue; break; }
+      const c=(d.candidates||[])[0], text=((c&&c.content&&c.content.parts)||[]).filter(p=>p.text&&!p.thought).map(p=>p.text).join("");
+      if(!text){ ult=new Error("o Gemini respondeu sem texto"); break; }
+      const fontes=(((c.groundingMetadata||{}).groundingChunks)||[]).map(g=>g.web).filter(Boolean).map(w=>({type:"web_search_result", url:w.uri, title:w.title||w.uri}));
+      const content=[{type:"text", text}]; if(fontes.length) content.unshift({type:"web_search_tool_result", content:fontes});
+      return {text, data:{content, stop_reason:c.finishReason==="MAX_TOKENS"?"max_tokens":"end_turn", usage:{}, model:mod, provedor:"gemini"}};
+    }
+  }
+  throw ult||new Error("o Gemini não respondeu");
+}
+async function callGroqIA({system, messages, max_tokens=8000, tools}){
+  const key=lsGet("groqKey",""), busca=iaBusca(tools), temImg=messages.some(m=>iaImgs(m.content).length);
+  const msgs=[]; if(system) msgs.push({role:"system", content:iaTxt(system)});
+  for(const m of messages){ const imgs=iaImgs(m.content);
+    if(imgs.length && m.role!=="assistant") msgs.push({role:"user", content:[{type:"text", text:iaTxt(m.content)||" "}, ...imgs.slice(0,5).map(b=>({type:"image_url", image_url:{url:`data:${b.source.media_type};base64,${b.source.data}`}}))]});
+    else msgs.push({role:m.role==="assistant"?"assistant":"user", content:iaTxt(m.content)}); }
+  const mods = temImg ? ["meta-llama/llama-4-scout-17b-16e-instruct","meta-llama/llama-4-maverick-17b-128e-instruct"] : busca ? ["groq/compound","openai/gpt-oss-120b","llama-3.3-70b-versatile"] : ["openai/gpt-oss-120b","llama-3.3-70b-versatile","openai/gpt-oss-20b"];
+  let ult=null;
+  for(const mod of mods){
+    const lim=/gpt-oss/.test(mod)?32000:/llama-3\.3/.test(mod)?32000:8000;
+    let r, d={};
+    try{ r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{"content-type":"application/json","authorization":"Bearer "+key},body:JSON.stringify({model:mod, messages:msgs, max_tokens:Math.min(max_tokens||8000, lim), temperature:0.8})}); d=await r.json().catch(()=>({})); }
+    catch(e){ ult=e; continue; }
+    if(!r.ok){ ult=new Error((d.error&&d.error.message)||("o Groq respondeu com erro "+r.status)); ult.status=r.status; if(r.status===401) break; continue; }
+    const ch=(d.choices||[])[0]||{}, msg=ch.message||{}, text=String(msg.content||"");
+    if(!text.trim()){ ult=new Error("o Groq respondeu sem texto"); continue; }
+    const fontes=(msg.executed_tools||[]).flatMap(t=>((t.search_results||{}).results)||[]).filter(x=>x&&x.url).map(x=>({type:"web_search_result", url:x.url, title:x.title||x.url}));
+    const content=[{type:"text", text}]; if(fontes.length) content.unshift({type:"web_search_tool_result", content:fontes});
+    return {text, data:{content, stop_reason:ch.finish_reason==="length"?"max_tokens":"end_turn", usage:{}, model:mod, provedor:"groq"}};
+  }
+  throw ult||new Error("o Groq não respondeu");
+}
+async function callAnthropic({system, messages, max_tokens=8000, tools, recurso="Outro", marca=MARCA, model}){
   const key=lsGet("apiKey",""); if(!key){ const e=new Error("Cole a chave da API em Configurações."); e.code="nokey"; throw e; }
   const body={model:model||settings.apiModel||"claude-sonnet-5-5", max_tokens, messages}; if(system) body.system=system; if(tools&&tools.length) body.tools=tools;
   // sem "pensamento estendido": a resposta é JSON curto, o raciocínio interno só gastava tokens de saída
@@ -3330,7 +3391,7 @@ async function callClaude1({system, messages, max_tokens=8000, tools, recurso="O
   body.messages=messages.map(m=>typeof m.content==="string"&&m.content.includes("<<<CACHE>>>") ? {role:m.role, content:[{type:"text", text:m.content.split("<<<CACHE>>>")[0], cache_control:{type:"ephemeral"}},{type:"text", text:m.content.split("<<<CACHE>>>")[1]}]} : m);
   let r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify(body)});
   let raw=await r.text(); let data=null; try{ data=JSON.parse(raw); }catch(e){}
-  if(!r.ok && r.status===400 && body.thinking && /thinking/i.test(raw)){ lsSet("semThinking","0"); return callClaude1({system, messages, max_tokens, tools, recurso, marca, model}); }
+  if(!r.ok && r.status===400 && body.thinking && /thinking/i.test(raw)){ lsSet("semThinking","0"); return callAnthropic({system, messages, max_tokens, tools, recurso, marca, model}); }
   if(!r.ok){ const m=data&&data.error&&data.error.message; const e=new Error(r.status===401?"a chave foi recusada (401). Confira se é uma chave de API (começa com sk-ant-api) e se ainda vale.":(m||("a API respondeu com erro "+r.status))); e.status=r.status; e.apiMsg=m||""; throw e; }
   if(!data) throw new Error("a API respondeu algo que não é JSON. Tente de novo.");
   const u=data.usage||{}; registrarUso({marca, recurso, inp:(u.input_tokens||0)+(u.cache_read_input_tokens||0)+(u.cache_creation_input_tokens||0), out:u.output_tokens||0, buscas:(u.server_tool_use&&u.server_tool_use.web_search_requests)||0, model:body.model});
@@ -3405,11 +3466,13 @@ $("#tomDetail").addEventListener("click", async e=>{
 
 /* ---------- configurações ---------- */
 function renderConfig(){
-  $("#apiKey").value=lsGet("apiKey",""); $("#apiModel").value=settings.apiModel; $("#asrModel").value=settings.asrModel; $("#asrAcervo").value=settings.asrAcervo||FALLBACK_ASR; $("#handleIn").value=settings.handle;
+  $("#apiKey").value=lsGet("apiKey",""); $("#geminiKey").value=lsGet("geminiKey",""); $("#groqKey").value=lsGet("groqKey",""); $("#apiModel").value=settings.apiModel; $("#asrModel").value=settings.asrModel; $("#asrAcervo").value=settings.asrAcervo||FALLBACK_ASR; $("#handleIn").value=settings.handle;
   renderKit();
 }
 async function saveSettings(){ await idb.set("kv","settings",Object.assign({},settings)); }
 $("#apiKey").addEventListener("change", e=>{ const v=e.target.value.trim(); if(v && !/^sk-ant-/.test(v)){ e.target.value=lsGet("apiKey",""); return toast("Isso não parece uma chave da API (começa com sk-ant-). Nada foi trocado."); } if(v===lsGet("apiKey","")) return; lsSet("apiKey", v); toast(v?"Chave salva neste navegador":"Chave apagada deste navegador"); });
+$("#geminiKey").addEventListener("change", e=>{ const v=e.target.value.trim(); lsSet("geminiKey", v); toast(v?"Chave do Gemini salva neste navegador":"Chave do Gemini apagada"); });
+$("#groqKey").addEventListener("change", e=>{ const v=e.target.value.trim(); lsSet("groqKey", v); toast(v?"Chave do Groq salva neste navegador":"Chave do Groq apagada"); });
 $("#apiModel").addEventListener("change", e=>{ lsSet("apiModel", e.target.value.trim()||"claude-sonnet-5-5"); settings.apiModel=e.target.value.trim()||"claude-sonnet-5-5"; saveSettings(); });
 $("#asrModel").addEventListener("change", e=>{ settings.asrModel=e.target.value; saveSettings(); });
 $("#asrAcervo").addEventListener("change", e=>{ settings.asrAcervo=e.target.value; saveSettings(); });
@@ -3974,7 +4037,7 @@ async function processarItem(it){
       await saveItem(it);
     }
     // a IA entende as cenas
-    if(it.opts && it.opts.ia && lsGet("apiKey","")) await entenderItem(it);
+    if(it.opts && it.opts.ia && temIA()) await entenderItem(it);
     it.status="pronto"; it.etapa=""; await saveItem(it); notice("");
     toast(`${nomeItem(it)} entrou no acervo: ${(it.cenas||[]).length} cenas e ${(it.sugeridos||[]).length} momentos sugeridos`);
   }catch(e){ console.error(e); it.status="erro"; it.etapa=e.message||String(e); await saveItem(it); notice(`Acervo · ${nomeItem(it)}: ${it.etapa}`,"bad"); }
@@ -4158,7 +4221,7 @@ async function decupar1(){
     const r=buscarMomentos(q,[it]); decupAtual={pedido:q, local:true, trechos:r.map(x=>({s:x.m.s, e:x.m.e, titulo:x.m.titulo||x.m.text||"", descricao:x.m.descricao||x.m.motivo||""}))}; renderDecup(); renderTl(); return;
   }
   if(!it.cues.length) return toast("Esse vídeo ainda não tem transcrição");
-  if(!lsGet("apiKey","")){ go("config"); return toast("A decupagem usa a IA: cole a chave da API em Configurações"); }
+  if(!temIA()){ go("config"); return toast("A decupagem usa a IA: cole a chave da API em Configurações"); }
   const fx=faixaDuracao(q), qtd=quantidadePedida(q);
   const regraDur = fx ? `- DURAÇÃO OBRIGATÓRIA: cada trecho tem entre ${fx.min} e ${fx.max} segundos (${mmss(fx.min)} a ${mmss(fx.max)}). Trecho fora disso é inválido: junte falas vizinhas do mesmo assunto até chegar na duração.` : `- Cada trecho entre 8 e 59 s.`;
   $("#itDecup").innerHTML=`<p class="status">Decupando: lendo a transcrição inteira${fx?` · trechos de ${mmss(fx.min)} a ${mmss(fx.max)}`:""}${qtd?` · ${qtd} trechos`:""}...</p>`;
@@ -4313,7 +4376,7 @@ PLAT.fabrica = ()=>{
   $("#fabCal").innerHTML=proximasDatas(10,1).slice(0,6).map(d=>`<span><b>${esc(d.nome)}</b> · ${esc(d.quando)}</span>`).join("");
   const nItens=ITENS.filter(i=>i.marca===m && i.status==="pronto").length;
   if(!fabAtual || fabAtual.marca!==m) fabAtual=IDEIAS.filter(x=>x.marca===m && x.status==="atual").pop()||null;
-  $("#fabStatus").innerHTML = !lsGet("apiKey","") ? `Oportunidades usa a IA da plataforma. Cole a chave em <button class="linkbtn" style="color:var(--accent-2)" data-go="config">Configurações</button>.`
+  $("#fabStatus").innerHTML = !temIA() ? `Oportunidades usa a IA da plataforma. Cole a chave em <button class="linkbtn" style="color:var(--accent-2)" data-go="config">Configurações</button>.`
     : !nItens ? `O acervo de ${esc(M.nome)} ainda está vazio: as ideias saem sem trecho pronto. Suba vídeos em <button class="linkbtn" style="color:var(--accent-2)" data-go="acervo">Acervo</button> pra cada ideia já vir com a cena certa.` : "";
   renderFabAtual(); renderEsteira();
 };
@@ -4967,7 +5030,7 @@ function renderSL(){
   $("#slFontes").innerHTML=(r.fontes||[]).length?"Fontes: "+r.fontes.map(f=>`<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.titulo.slice(0,60))}</a>`).join(" · "):"";
 }
 async function rodarSL(tema, cat){
-  if(!lsGet("apiKey","")) return toast("Cole a chave da API em Configurações");
+  if(!temIA()) return toast("Cole a chave da API em Configurações");
   tema=(tema||"").trim(); if(!tema) return toast("Escreva um tema");
   const b=cat?$(`[data-slmais="${cat}"]`):$("#slGo"); const txt=b?b.textContent:""; if(b){ b.disabled=true; b.textContent=cat?"buscando...":"Pesquisando..."; }
   const extra=$("#slFoco").value.trim();
@@ -5029,7 +5092,7 @@ function renderInsSalvos(){
     : `<p class="small muted" style="margin:0">Salve os insights que fazem sentido pra marca. As Oportunidades passam a usar todos os que estiverem marcados aqui.</p>`;
 }
 async function rodarIns(){
-  if(!lsGet("apiKey","")) return toast("Cole a chave da API em Configurações");
+  if(!temIA()) return toast("Cole a chave da API em Configurações");
   const tema=$("#insTema").value.trim(); if(!tema) return toast("Escreva o tema ou cole o briefing");
   const prog=$("#insProg").value, b=$("#insGo"); b.disabled=true; b.textContent="Pensando...";
   const prompt=`ATUE COMO estrategista cultural e comportamental sênior de social media no Brasil. ${contextoMarca()}${prog?`\nO conteúdo é sobre: ${prog}.`:""}
@@ -7334,7 +7397,7 @@ class ZipStore{ constructor(){ this.parts=[]; this.cd=[]; this.off=0; }
 
 /* ---------- aprender com referência ---------- */
 $("#moAprender").addEventListener("click", ()=>$("#moRefIn").click());
-$("#moRefIn").addEventListener("change", async e=>{ const f=e.target.files[0]; e.target.value=""; if(!f) return; if(!lsGet("apiKey","")) return toast("Cole a chave da API em Configurações");
+$("#moRefIn").addEventListener("change", async e=>{ const f=e.target.files[0]; e.target.value=""; if(!f) return; if(!temIA()) return toast("Cole a chave da API em Configurações");
   const st=$("#moRefSt"); st.hidden=false; st.textContent="Lendo os quadros do vídeo...";
   try{
     const v=document.createElement("video"); v.muted=true; v.src=URL.createObjectURL(f); await new Promise((r,j)=>{ v.onloadedmetadata=r; v.onerror=j; });
