@@ -1505,7 +1505,7 @@ html[data-tema] .fab-btn span{background:transparent;color:#fff;font-family:var(
   <!-- ITEM DO ACERVO -->
   <section class="view wrap" id="v-item" hidden>
     <div class="head"><div><div class="eyebrow" id="itEyebrow">Acervo</div><h1 id="itTitulo">Título</h1><p class="small muted" id="itSub"></p></div>
-      <div class="row"><button class="btn" data-go="acervo">← Voltar</button><button class="btn" id="itEditar">Editar dados</button><button class="btn ghost" id="itApagar">Apagar</button></div></div>
+      <div class="row"><button class="btn" data-go="acervo">← Voltar</button><button class="btn" id="itEditar">Editar dados</button><button class="btn primary" id="itPraJob" title="Usa a entrada e a saída marcadas; sem elas, os trechos marcados; sem nada marcado, o vídeo inteiro">→ Enviar pra job</button><button class="btn ghost" id="itApagar">Apagar</button></div></div>
     <div id="itNeedFile" class="notice warn" hidden></div>
     <div class="grid-r">
       <div class="stage">
@@ -2559,10 +2559,12 @@ async function analyze(j){
 
   step("models","run");
   let faceOk=true, asrOk=true;
+  const itAcv = j.origem && j.origem.itemId && typeof ITENS==="object" ? ITENS.find(i=>i.id===j.origem.itemId) : null;
+  const cuesAcv = itAcv && Array.isArray(itAcv.cues) && itAcv.cues.length ? itAcv.cues : null;
   try{ await loadFace(m=>step("models","run",m)); }catch(e){ faceOk=false; console.error(e); }
-  try{ await loadAsr(m=>step("models","run",m)); }catch(e){ asrOk=false; console.error(e); }
+  if(!cuesAcv){ try{ await loadAsr(m=>step("models","run",m)); }catch(e){ asrOk=false; console.error(e); } }
   if(NO_AI){ faceOk=false; asrOk=false; }
-  step("models", faceOk&&asrOk?"ok":"err", faceOk&&asrOk?"detector de rosto e transcrição prontos":[!faceOk&&"detector de rosto não carregou (fica centralizado)", !asrOk&&"transcrição não carregou (cole o SRT na revisão)"].filter(Boolean).join(" · "), lap());
+  step("models", faceOk&&asrOk?"ok":"err", faceOk&&asrOk?(cuesAcv?"detector de rosto pronto · a fala vem da transcrição do acervo":"detector de rosto e transcrição prontos"):[!faceOk&&"detector de rosto não carregou (fica centralizado)", !asrOk&&"transcrição não carregou (cole o SRT na revisão)"].filter(Boolean).join(" · "), lap());
 
   // passada única: áudio + rostos + amostras de legenda gravada
   step("pass","run");
@@ -2605,7 +2607,13 @@ async function analyze(j){
   // transcrição
   step("asr","run");
   let cues=[];
-  if(asrOk && asr){
+  if(cuesAcv){
+    const jan=wins.map(w=>({a:w.a, b:w.b}));
+    j.cues=cuesAcv.filter(c=>jan.some(w=>c.e>w.a && c.s<w.b)).map(c=>{ const w=jan.find(w=>c.e>w.a && c.s<w.b); const o={s:+Math.max(c.s,w.a).toFixed(2), e:+Math.min(c.e,w.b).toFixed(2), text:String(c.text||"").trim()}; if(Array.isArray(c.words)) o.words=c.words.filter(x=>x.s>=w.a-0.05 && x.s<=w.b+0.05); return o; }).filter(c=>c.text && c.e>c.s).sort((a,b)=>a.s-b.s);
+    if(typeof aplicarGlossario==="function") j.cues.forEach(c=>{ c.text=aplicarGlossario(c.text, chaveRef(j), marcaDe(j)); c.o=c.text; });
+    step("asr","ok",`${j.cues.length} legendas da transcrição que já estava no acervo`, lap());
+  }
+  else if(asrOk && asr){
     for(let i=0;i<pcmWins.length;i++){
       const {w,chunks,rate}=pcmWins[i];
       step("asr","run",`trecho ${i+1} de ${pcmWins.length}: preparando áudio`);
@@ -4169,6 +4177,13 @@ $("#itSide").addEventListener("click", async e=>{
   const sg=e.target.closest("[data-marcsug]"); if(sg){ const c=it.sugeridos.find(x=>x.id===sg.dataset.marcsug); it.marcacoes.push({id:nid("m"), s:c.s, e:c.e, nome:c.titulo, tarja:c.tarja, criadoEm:new Date().toISOString()}); await saveItem(it); toast("Marcado"); renderTl(); return; }
   const j=e.target.closest("[data-job]"); if(j){ const c=it.marcacoes.find(x=>x.id===j.dataset.job); return mandarPraProducao(it,[c],{nome:c.nome, tarja:c.tarja}); }
   if(e.target.id==="jobTodos") return mandarPraProducao(it, it.marcacoes, {nome:nomeItem(it)+" · "+it.marcacoes.length+" trechos"});
+});
+$("#itPraJob").addEventListener("click", async ()=>{
+  const it=ITENS.find(i=>i.id===itemAtual); if(!it) return;
+  if(itIn!=null && itOutT!=null){ const [a,b]=encaixar(it,itIn,itOutT); const nome=$("#itNome").value.trim()||`${nomeItem(it)} · ${mmss(a)}`; return mandarPraProducao(it,[{s:a,e:b}],{nome}); }
+  if((it.marcacoes||[]).length){ const ms=it.marcacoes.slice().sort((x,y)=>x.s-y.s); return mandarPraProducao(it, ms, {nome: ms.length===1 ? ms[0].nome : nomeItem(it)+" · "+ms.length+" trechos", tarja: ms.length===1 ? ms[0].tarja : undefined}); }
+  const D=it.dur||itv.duration||0; if(!D) return toast("O vídeo ainda não carregou");
+  return mandarPraProducao(it,[{s:0,e:+D.toFixed(2)}],{nome:nomeItem(it)});
 });
 $("#itEditar").addEventListener("click", async ()=>{
   const it=ITENS.find(i=>i.id===itemAtual); if(!it) return; const t=tituloDe(it);
